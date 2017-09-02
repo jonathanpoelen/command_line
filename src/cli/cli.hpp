@@ -64,6 +64,10 @@ constexpr class next_arg_t {} next_arg {};
 constexpr class random_t {} random {};
 constexpr class ended_t {} ended {};
 
+constexpr class default_value_parser_t {} default_value_parser {};
+
+constexpr class unspecified_t {} unspecified {};
+
 template<class... Ts>
 struct tuple_t : Ts...
 {
@@ -75,14 +79,21 @@ struct tuple_t : Ts...
 
 private:
   template<class Tag, class T>
-  static constexpr T const& at_impl(tagged<Tag, T> const& x)
+  static constexpr tagged<Tag, T> const& at_impl(tagged<Tag, T> const& x)
   {
-    return x.value;
+    return x;
   }
 
 public:
   template<class Tag>
   constexpr auto operator[](Tag) const
+  -> decltype(at_impl<Tag>(*this).value)
+  {
+    return at_impl<Tag>(*this).value;
+  }
+
+  template<class Tag>
+  constexpr auto get(Tag) const
   -> decltype(at_impl<Tag>(*this))
   {
     return at_impl<Tag>(*this);
@@ -99,6 +110,23 @@ public:
   -> decltype(f(std::declval<Ts&>()...))
   {
     return f(static_cast<Ts&>(*this)...);
+  }
+};
+
+
+template<>
+struct tuple_t<>
+{
+  constexpr tuple_t() = default;
+
+  template<class F>
+  void each(F&&)
+  {}
+
+  template<class F>
+  auto apply(F&& f)
+  {
+    return f();
   }
 };
 
@@ -196,22 +224,47 @@ namespace param_types
     constexpr operator()(random_t) const noexcept
     { return {}; }
   };
+
+  struct action
+  {
+    template<class T>
+    constexpr T operator()(T x) const noexcept
+    { return x; }
+  };
+
+  struct value_parser
+  {
+    template<class T>
+    constexpr T operator()(T x) const noexcept
+    { return x; }
+  };
 }
+
+template<class T>
+using disable_unspecified = std::enable_if_t<!std::is_same<std::decay_t<T>, unspecified_t>::value, bool>;
 
 template<class Tag, class ValueMaker>
 struct param
 {
   using tag = Tag;
 
-  template<class T>
+  template<class T, disable_unspecified<T> = 1>
   constexpr auto operator()(T&& x) const noexcept
   -> tagged<tag, decltype(ValueMaker{}(std::forward<T>(x)))>
   { return {ValueMaker{}(std::forward<T>(x))}; }
 
-  template<class T>
+  template<class T, disable_unspecified<T> = 1>
   constexpr auto operator=(T&& x) const noexcept
   -> tagged<tag, decltype(ValueMaker{}(std::forward<T>(x)))>
   { return {ValueMaker{}(std::forward<T>(x))}; }
+
+  constexpr auto operator()(unspecified_t) const noexcept
+  -> tagged<tag, unspecified_t>
+  { return {}; }
+
+  constexpr auto operator=(unspecified_t) const noexcept
+  -> tagged<tag, unspecified_t>
+  { return {}; }
 };
 
 #define CL_MAKE_PARAM(tag_name, value_maker) \
@@ -220,12 +273,10 @@ struct param
 
 CL_MAKE_PARAM(desc, param_types::string);
 
-CL_MAKE_PARAM(long_opt, param_types::string);
 CL_MAKE_PARAM(long_prefix, param_types::string_list);
 CL_MAKE_PARAM(long_optional_suffix, param_types::suffix);
 CL_MAKE_PARAM(long_required_suffix, param_types::suffix);
 
-CL_MAKE_PARAM(short_opt, param_types::string);
 CL_MAKE_PARAM(short_prefix, param_types::string);
 CL_MAKE_PARAM(short_optional_suffix, param_types::suffix);
 CL_MAKE_PARAM(short_required_suffix, param_types::suffix);
@@ -233,14 +284,20 @@ CL_MAKE_PARAM(short_required_suffix, param_types::suffix);
 CL_MAKE_PARAM(positional_opt, param_types::positional);
 CL_MAKE_PARAM(sentinel_value, param_types::string);
 
+CL_MAKE_PARAM(short_name, param_types::string);
+CL_MAKE_PARAM(long_name, param_types::string);
+CL_MAKE_PARAM(action, param_types::action);
+CL_MAKE_PARAM(value_parser, param_types::value_parser);
+
 #undef CL_MAKE_PARAM
 
 template<char... c>
-struct tagged<tags::short_opt, lstring<c...>>
+struct tagged<tags::short_name, lstring<c...>>
 {
-  static_assert(sizeof...(c) != 1, "too many character");
-  using tag = tags::short_opt;
+  static_assert(sizeof...(c) <= 1, "too many character");
+  using tag = tags::short_name;
   using type = lstring<c...>;
+  type value;
 };
 
 namespace literals
@@ -252,7 +309,7 @@ namespace literals
   }
 
   template<class CharT, CharT... c>
-  constexpr tagged<tags::short_opt, lstring<c...>> operator "" _c()
+  constexpr tagged<tags::short_name, lstring<c...>> operator "" _c()
   {
     return {};
   }
@@ -297,6 +354,7 @@ auto make_params(Ts... xs)
   return [xs...](auto&&... ys){
     static_assert(detail::check_tag<TupleTag>(ys...), "");
     tuple_t<tagged<dtag<decltype(ys)>, detail::ref<decltype(ys)>>...> t({ys}...);
+    // return tagged_tuple<tags::cli_parser>(detail::extract_param(xs, t, 1)...);
     return Class<decltype(detail::extract_param(xs, t, 1))...>{
       {detail::extract_param(xs, t, 1)...}
     };
@@ -308,16 +366,65 @@ auto make_params(Ts... xs)
 template<class T>
 void print_signature(T const&);
 
-template<class... Opts>
-struct Parser
+template<class... Ts>
+struct Option
 {
-  tuple_t<Opts...> t;
+  tuple_t<Ts...> t;
+};
+
+template<class... Ts>
+struct Options
+{
+  tuple_t<Ts...> t;
+
+  // static_assert(a, "");
 
   void parse(int ac, char /*const*/** av)
   {
     t.each([](auto const & x){ print_signature(x); });
+  }
+};
 
-    auto get = [this](auto param) { return t[typename decltype(param)::tag{}]; };
+template<class... Ts>
+Options<Ts...> options(Ts... xs)
+{
+  return Options<Ts...>{{xs...}};
+}
+
+template<class... Ts>
+struct Parser
+{
+  tuple_t<Ts...> t;
+
+  template<class Param>
+  auto get(Param param)
+  {
+    return t[typename decltype(param)::tag{}];
+  };
+
+  template<class Tagged>
+  static Tagged get_default(Tagged tagged)
+  {
+    return tagged;
+  };
+
+  template<class Tag>
+  auto get_default(tagged<Tag, unspecified_t>) const
+  {
+    return t.get(Tag{});
+  };
+
+  template<class ...Opt>
+  auto command_line(Opt ...opt)
+  {
+    return options(opt.t.apply([this](auto&& ...xs){
+      return tuple(this->get_default(xs)...);
+    })...);
+  }
+
+  void parse(int ac, char /*const*/** av)
+  {
+    t.each([](auto const & x){ print_signature(x); });
 
     for (int i = 1; i <= ac; ++i, ++av)
     {
@@ -391,8 +498,28 @@ auto make_parser(Ts&&... xs)
   )(std::forward<Ts>(xs)...);
 }
 
+template<class... Ts>
+auto option(Ts&&... xs)
+{
+  using literals::operator""_s;
+
+  return make_params<Option>(
+    short_prefix = unspecified,
+    short_optional_suffix = unspecified,
+    short_required_suffix = unspecified,
+    long_prefix = unspecified,
+    long_optional_suffix = unspecified,
+    long_required_suffix = unspecified,
+    short_name = ""_s,
+    long_name = ""_s,
+    desc = ""_s,
+    action = unspecified,
+    value_parser = default_value_parser
+  )(std::forward<Ts>(xs)...);
+}
+
 // help()
-// hook()
+// action()
 // parser()
 // prefix()
 // suffix()
