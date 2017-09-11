@@ -415,6 +415,7 @@ struct at_
   }
 };
 
+// TODO by
 template<class Param>
 constexpr at_<Param> at(Param)
 { return {}; }
@@ -430,59 +431,28 @@ struct to_hana_tuple_
 
 constexpr to_hana_tuple_ to_hana_tuple {};
 
-template<class ShortName>
-struct get_by_short_name_t
+// hana::concat
+template<char... c1, char... c2>
+hana::string<c1..., c2...> strcat(hana::string<c1...>, hana::string<c2...>)
 {
-  template<class... T>
-  constexpr auto
-  operator()(detail::ref<tuple_t<ShortName, T...> const&> r) const
-  -> decltype(r.x)
-  {
-    return r.x;
-  }
-};
+  return {};
+}
 
-template<class ShortName>
-constexpr auto get_by_short_name
-  = hana::sfinae(get_by_short_name_t<ShortName>{});
-
-template<class LongName>
-struct get_by_long_name_t
+template<class Prefix, class Cat, class I>
+auto concat_prefixes_and_name(hana::string<>, Prefix, Cat, I)
 {
-  template<class ShortName, class... T>
-  constexpr auto
-  operator()(detail::ref<tuple_t<ShortName, LongName, T...> const&> r) const
-  -> decltype(r.x)
-  {
-    return r.x;
-  }
-};
+  return hana::make_tuple();
+}
 
-template<class LongName>
-constexpr auto get_by_long_name
-  = hana::sfinae(get_by_long_name_t<LongName>{});
-
-template<class Opt, class NameParam, class PrefixParam, class Cat, class I>
-auto concat_prefixes_and_name(
-  Opt& opt, NameParam name_param, PrefixParam prefix_param, Cat cat, I i)
+template<class Name, class Prefixes, class Cat, class I>
+auto concat_prefixes_and_name(Name name, Prefixes prefixes, Cat cat, I i)
 {
-  auto name = at(name_param)(opt);
-  return hana::eval_if(
-    hana::is_empty(name),
-    hana::make_tuple,
-    [&](){
-      return at(prefix_param)(opt).apply([=](auto ...s1) {
-        return hana::make_tuple(hana::make_tuple(
-          i, cat, /*concat s1, name*/hana::unpack(s1, [=](auto ...c1){
-            return hana::unpack(name, [=](auto ...c2){
-              return hana::make_string(c1..., c2...);
-            });
-          })
-        )...);
-      });
-    }
-  );
-};
+  return prefixes.apply([=](auto ...s1) {
+    return hana::make_tuple(hana::make_tuple(
+      i, cat, strcat(s1, name)
+    )...);
+  });
+}
 
 constexpr class short_cat_t {} short_cat {};
 constexpr class long_cat_t {} long_cat {};
@@ -513,14 +483,19 @@ struct Options
 {
   hana::tuple<Option...> opts;
 
+  template<class NameOpts>
+  struct ArgsParser;
+
   void parse(int ac, char /*const*/** av) const
   {
     print_signature(opts);
 
     auto name_options = hana::flatten(hana::zip_with(
       [](auto& opt, auto i) {
-        auto short_names = concat_prefixes_and_name(opt, short_name, short_prefix, short_cat, i);
-        auto long_names = concat_prefixes_and_name(opt, long_name, long_prefix, long_cat, i);
+        auto short_names = concat_prefixes_and_name(
+          at(short_name)(opt), at(short_prefix)(opt), short_cat, i);
+        auto long_names = concat_prefixes_and_name(
+          at(long_name)(opt), at(long_prefix)(opt), long_cat, i);
         print_signature(short_names);
         print_signature(long_names);
         return hana::concat(short_names, long_names);
@@ -534,33 +509,35 @@ struct Options
 
     print_signature(sorted_name_options);
 
-    auto make_tree = [](auto rec, auto name_options){
-      auto group_name_options = hana::group(
-        name_options,
-        hana::comparing(group_tree_cmp_t{})
-      );
+    auto get_char_from_str_at = [&](auto ichar){
+      return [&](auto i){
+        return hana::at(sorted_name_options[i][istr], ichar);
+      };
+    };
+
+    auto make_tree = hana::fix([&](auto rec, auto indexes, auto ichar){
+      auto get_char_at = get_char_from_str_at(ichar);
+
+      auto group_i_options = hana::group(indexes, hana::comparing(get_char_at));
 
       return hana::transform(
-        group_name_options,
-        [rec](auto & tt){
-          return hana::eval_if(
-            hana::size(tt) != hana::size_c<1>,
-            [tt, rec](auto _){
-              auto subtree = hana::transform(tt, [](auto t){
-                return hana::make_tuple(t[iidx], t[icat], hana::drop_front(t[istr]));
-              });
-              return hana::make_tuple(
-                hana::at(tt[0_c][istr], 0_c),
-                _(rec)(subtree)
-              );
-            },
-            hana::always(tt)
+        group_i_options,
+        [&](auto & gindexes){
+          return hana::make_tuple(
+            get_char_at(gindexes[0_c]),
+            hana::eval_if(
+              hana::size(gindexes) == hana::size_c<1>,
+              hana::always(gindexes[0_c]),
+              [&](auto _) { return _(rec)(gindexes, ichar + 1_c); }
+            )
           );
         }
       );
-    };
+    });
 
-    auto tree = hana::fix(make_tree)(sorted_name_options);
+    auto tree = make_tree(
+      hana::to_tuple(hana::make_range(0_c, hana::size(sorted_name_options))),
+      0_c);
 
     print_signature(tree);
 
@@ -573,85 +550,107 @@ struct Options
       }
 
       auto s = *av;
-      bool found = false;
 
-      hana::for_each(tree, [&](auto & t){
-        if (found) {
-          return;
+      auto selected_option = [&](auto i, auto depth){
+        auto option = sorted_name_options[i];
+        auto name = option[istr];
+        std::cout << " idx = " << i << " = " << hana::to<char const*>(name) << "\n";
+        auto remaining = hana::int_c<hana::size(name)> - depth;
+        auto r = hana::fold(
+          hana::make_range(0_c, remaining),
+          hana::true_c,
+          [&](auto state, auto istr){
+            return state && hana::at(name, depth+istr) == *s
+              ? (++s, true) : false;
+          }
+        );
+        if (r) {
+          std::cout << "ok\n";
+          at(action)(this->opts[option[iidx]])();
         }
+        else {
+          std::cout << "fail\n";
+        }
+      };
+
+      auto parse_arg = [&](auto rec, auto t, auto i, auto depth){
         hana::eval_if(
-          hana::size(t) == hana::size_c<2>,
+          t[i][0_c] == hana::char_c<'\0'>,
+          [&](auto _){ selected_option(_(t)[i][1_c], depth); },
           [&](auto _){
-            auto c = _(t)[0_c];
-            if (*s == c) {
-              std::cout << "param " << c << "\n";
-              found = true;
+            if (t[i][0_c] == *s) {
+              std::cout << *s << "\n";
+              ++s;
+              auto sub = _(t)[i][1_c];
+              hana::eval_if(
+                hana::is_a<hana::tag_of_t<decltype(sub)>, hana::tuple_tag>,
+                [&](auto _){
+                  _(rec)(sub, 0_c, depth + 1_c);
+                },
+                [&](auto _){ selected_option(_(t)[i][1_c], depth+1_c); }
+              );
             }
-          },
-          [&](auto _){
-            auto name = _(t)[0_c][istr];
-            if (*s == hana::at(name, 0_c)) {
-              std::cout << "param " << hana::to<char const*>(name) << "\n";
-              found = true;
+            else {
+              hana::eval_if(
+                hana::size_c<decltype(i){}+1> != hana::size(_(t)),
+                [&](auto _){
+                  _(rec)(t, i+1_c, depth);
+                },
+                []{}
+              );
             }
           }
         );
-      });
+      };
+
+      hana::fix(parse_arg)(tree, 0_c, 0_c);
+
+      // ArgsParser<decltype(sorted_name_options)>{sorted_name_options, s}
+        // .parse_arg(tree, 0_c);
+    }
+  }
+
+  template<class NameOpts>
+  struct ArgsParser
+  {
+    NameOpts name_opts;
+    const char* s;
+
+    template<class Tree, class Depth>
+    void parse_arg(Tree t, Depth depth)
+    {
+      parse_next_arg(t, 0_c, hana::llong_c<hana::size(t)>, depth);
     }
 
-    // for (int i = 1; i <= ac; ++i, ++av)
-    // {
-    //   if (!**av)
-    //   {
-    //     std::cout << "empty positional\n";
-    //     continue;
-    //   }
-    //
-    //   if (get(long_prefix).apply([av](auto prefix_){
-    //     auto prefix = hana::to<char const*>(prefix_);
-    //     auto s = *av;
-    //     if (prefix[0])
-    //     {
-    //       auto iprefix = 0u;
-    //       for (; prefix[iprefix] == *s; ++s)
-    //       {
-    //         ++iprefix;
-    //         if (!prefix[iprefix])
-    //         {
-    //           std::cout << "long: " << ++s << "\n";
-    //           return true;
-    //         }
-    //       }
-    //     }
-    //     return false;
-    //    })) {
-    //           continue;
-    //     }
-    //
-    //   auto prefix = hana::to<char const*>(get(short_prefix));
-    //
-    //   if (prefix[0])
-    //   {
-    //     auto s = *av;
-    //     auto iprefix = 0u;
-    //     for (; prefix[iprefix]; ++s)
-    //     {
-    //       if (prefix[iprefix] == *s)
-    //       {
-    //         std::cout << "short: " << ++s << "\n";
-    //         break;
-    //       }
-    //       ++iprefix;
-    //     }
-    //     if (prefix[iprefix])
-    //     {
-    //       continue;
-    //     }
-    //   }
-    //
-    //   std::cout << "positional: " << *av << "\n";
-    // }
-  }
+    template<class Tree, class I, class IEnd, class Depth>
+    void parse_next_arg(Tree t, I i, IEnd iend, Depth depth)
+    {
+      if (t[i][0_c] == *s) {
+        std::cout << *s << "\n";
+        ++s;
+        parse_sub_tree(t[i][1_c], depth);
+      }
+      else {
+        parse_next_arg(t, i+1_c, iend, depth);
+      }
+    }
+
+    template<class Tree, class I, class Depth>
+    void parse_next_arg(Tree, I, I, Depth)
+    {}
+
+    template<class Depth, class T, T N>
+    void parse_sub_tree(hana::integral_constant<T, N> i, Depth)
+    {
+      std::cout << " idx = " << i << " = " << hana::to<char const*>(name_opts[i][istr]) << "\n";
+    }
+
+    template<class Depth, class SubTree>
+    void parse_sub_tree(SubTree sub, Depth depth)
+    {
+      parse_arg(sub, depth+1_c);
+    }
+  };
 };
 
 template<class... Ts>
