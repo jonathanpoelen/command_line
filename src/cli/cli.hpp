@@ -528,7 +528,7 @@ struct Options
             hana::eval_if(
               hana::size(gindexes) == hana::size_c<1>,
               hana::always(gindexes[0_c]),
-              [&](auto _) { return _(rec)(gindexes, ichar + 1_c); }
+              [&](auto _) { return rec(gindexes, ichar + _(1_c)); }
             )
           );
         }
@@ -573,37 +573,30 @@ struct Options
         }
       };
 
-      auto parse_arg = [&](auto rec, auto t, auto i, auto depth){
-        hana::eval_if(
-          t[i][0_c] == hana::char_c<'\0'>,
-          [&](auto _){ selected_option(_(t)[i][1_c], depth); },
-          [&](auto _){
-            if (t[i][0_c] == *s) {
-              std::cout << *s << "\n";
-              ++s;
-              auto sub = _(t)[i][1_c];
-              hana::eval_if(
-                hana::is_a<hana::tag_of_t<decltype(sub)>, hana::tuple_tag>,
-                [&](auto _){
-                  _(rec)(sub, 0_c, depth + 1_c);
-                },
-                [&](auto _){ selected_option(_(t)[i][1_c], depth+1_c); }
-              );
+      auto parse_arg = [&](auto rec, auto tt, auto depth) -> bool {
+        return hana::fold(tt, hana::true_c, [&](auto state, auto t){
+          return state && hana::eval_if(
+            t[0_c] == hana::char_c<'\0'>,
+            [&](auto _){ selected_option(t[_(1_c)], depth); return false; },
+            [&](auto _){
+              if (t[0_c] == *s) {
+                std::cout << *s << "\n";
+                ++s;
+                auto sub = t[_(1_c)];
+                hana::eval_if(
+                  hana::is_a<hana::tag_of_t<decltype(sub)>, hana::tuple_tag>,
+                  [&](auto _){ rec(sub, depth + _(1_c)); },
+                  [&](auto _){ selected_option(t[_(1_c)], depth + 1_c); }
+                );
+                return false;
+              }
+              return true;
             }
-            else {
-              hana::eval_if(
-                hana::size_c<decltype(i){}+1> != hana::size(_(t)),
-                [&](auto _){
-                  _(rec)(t, i+1_c, depth);
-                },
-                []{}
-              );
-            }
-          }
-        );
+          );
+        });
       };
 
-      hana::fix(parse_arg)(tree, 0_c, 0_c);
+      hana::fix(parse_arg)(tree, 0_c);
 
       // ArgsParser<decltype(sorted_name_options)>{sorted_name_options, s}
         // .parse_arg(tree, 0_c);
