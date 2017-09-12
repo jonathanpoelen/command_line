@@ -515,32 +515,6 @@ struct Options
       };
     };
 
-    auto make_tree = hana::fix([&](auto rec, auto indexes, auto ichar){
-      auto get_char_at = get_char_from_str_at(ichar);
-
-      auto group_i_options = hana::group(indexes, hana::comparing(get_char_at));
-
-      return hana::transform(
-        group_i_options,
-        [&](auto & gindexes){
-          return hana::make_tuple(
-            get_char_at(gindexes[0_c]),
-            hana::eval_if(
-              hana::size(gindexes) == hana::size_c<1>,
-              hana::always(gindexes[0_c]),
-              [&](auto _) { return rec(gindexes, ichar + _(1_c)); }
-            )
-          );
-        }
-      );
-    });
-
-    auto tree = make_tree(
-      hana::to_tuple(hana::make_range(0_c, hana::size(sorted_name_options))),
-      0_c);
-
-    print_signature(tree);
-
     for (int i = 1; i <= ac; ++i, ++av)
     {
       if (!**av)
@@ -573,30 +547,48 @@ struct Options
         }
       };
 
-      auto parse_arg = [&](auto rec, auto tt, auto depth) -> bool {
-        return hana::fold(tt, hana::true_c, [&](auto state, auto t){
-          return state && hana::eval_if(
-            t[0_c] == hana::char_c<'\0'>,
-            [&](auto _){ selected_option(t[_(1_c)], depth); return false; },
-            [&](auto _){
-              if (t[0_c] == *s) {
-                std::cout << *s << "\n";
-                ++s;
-                auto sub = t[_(1_c)];
-                hana::eval_if(
-                  hana::is_a<hana::tag_of_t<decltype(sub)>, hana::tuple_tag>,
-                  [&](auto _){ rec(sub, depth + _(1_c)); },
-                  [&](auto _){ selected_option(t[_(1_c)], depth + 1_c); }
-                );
-                return false;
-              }
-              return true;
+      auto parse_arg = [&](auto rec, auto indexes, auto ichar) -> bool {
+        auto get_char_at = get_char_from_str_at(ichar);
+
+        auto group_i_options = hana::group(indexes, hana::comparing(get_char_at));
+
+        return hana::fold(
+          group_i_options,
+          hana::true_c,
+          [&](auto state, auto & gindexes){
+            if (!state) {
+              return false;
             }
-          );
-        });
+            auto c = get_char_at(gindexes[0_c]);
+            return hana::eval_if(
+              c == hana::char_c<'\0'>,
+              [&](auto _){
+                selected_option(gindexes[_(0_c)], ichar);
+                return false;
+              },
+              [&](auto _){
+                if (c == *s) {
+                  std::cout << *s << "\n";
+                  ++s;
+                  return hana::eval_if(
+                    hana::size(gindexes) == hana::size_c<1>,
+                    [&](auto _){
+                      selected_option(gindexes[_(0_c)], ichar + 1_c);
+                      return false;
+                    },
+                    [&](auto _){ return rec(gindexes, ichar + _(1_c)); }
+                  );
+                }
+                return true;
+              }
+            );
+          }
+        );
       };
 
-      hana::fix(parse_arg)(tree, 0_c);
+      hana::fix(parse_arg)(
+        hana::to_tuple(hana::make_range(0_c, hana::size(sorted_name_options))),
+        0_c);
 
       // ArgsParser<decltype(sorted_name_options)>{sorted_name_options, s}
         // .parse_arg(tree, 0_c);
